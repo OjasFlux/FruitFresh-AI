@@ -5,15 +5,8 @@
 #include <LiquidCrystal_I2C.h>
 #include <Adafruit_MQTT.h>
 #include <Adafruit_MQTT_Client.h>
-#include "secrets.h"  // Copy secrets.example.h to secrets.h and enter credentials locally.
+#include "secrets.h"  
 
-// ============================================================
-// FruitFresh-AI: ESP8266 ESP-12E + DHT22 + MQ-135 + I2C LCD
-// Publishes temperature, humidity, and MQ-135 raw ADC to Adafruit IO.
-// Assumes a common 16x2 I2C LCD backpack at address 0x27.
-// ============================================================
-
-// Credentials live in the ignored local secrets.h file, not in this source file.
 #define AIO_SERVER   "io.adafruit.com"
 #define AIO_SERVERPORT 8883
 #define AIO_SPOILAGE_FEED "spoilage-alert"
@@ -24,11 +17,9 @@
 DHT dht(DHT_PIN, DHT_TYPE);
 
 // -------- MQ-135 analog output --------
-// AO MUST use the external voltage divider described in the wiring notes.
 #define MQ135_PIN A0
 
 // -------- I2C LCD --------
-// NodeMCU ESP-12E: SDA = D2 / GPIO4, SCL = D1 / GPIO5
 #define LCD_SDA D2
 #define LCD_SCL D1
 #define LCD_ADDRESS 0x27       // Try 0x3F if your LCD has a different address
@@ -37,8 +28,6 @@ DHT dht(DHT_PIN, DHT_TYPE);
 LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLUMNS, LCD_ROWS);
 
 // -------- Spoilage-alert outputs --------
-// Use external LEDs with series resistors. Use a transistor/driver for a
-// buzzer that draws more current than a GPIO pin can safely supply.
 #define GREEN_LED_PIN D7      // GPIO13
 #define RED_LED_PIN D5        // GPIO14
 #define BUZZER_PIN D6         // GPIO12; expects active-HIGH buzzer driver/module
