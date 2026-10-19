@@ -1,0 +1,40 @@
+
+services:
+  - type: web
+    name: fruitfresh-ai
+    runtime: node
+    plan: free
+
+    buildCommand: npm install --prefix server && npm install --prefix web && npm run build --prefix web
+    startCommand: node server/index.js
+    healthCheckPath: /api/health
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # Secrets: enter actual values in Render
+      - key: 5oHCPZ12XA9nILzI5dJp
+        sync: false
+      - key: response2
+        sync: false
+      - key: aio_LRkU75y6e9WQCFGvmwyRlp3K7vQQ
+        sync: false
+
+      # Adafruit IO feeds
+      - key: AIO_TEMPERATURE_FEED
+        value: temperature
+      - key: AIO_HUMIDITY_FEED
+        value: humidity
+      - key: AIO_MQ135_FEED
+        value: mq135
+      - key: AIO_SPOILAGE_FEED
+        value: spoilage-alert
+
+      # Spoilage alert rules
+      - key: ROTTEN_ALERT_THRESHOLD
+        value: "0.70"
+      - key: ROTTEN_TRIGGER_FRAMES
+        value: "2"
+      - key: ROTTEN_CLEAR_FRAMES
+        value: "3"
