@@ -18,7 +18,7 @@ services:
         sync: false
       - key: response2
         sync: false
-      - key: aio_LRkU75y6e9WQCFGvmwyRlp3K7vQQ
+      - key: aio_CVhB81lMqF9svLRvEJbN2loJ5h8t
         sync: false
 
       # Adafruit IO feeds
