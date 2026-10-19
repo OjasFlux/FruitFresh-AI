@@ -16,9 +16,9 @@ services:
       # Secrets: enter actual values in Render
       - key: 5oHCPZ12XA9nILzI5dJp
         sync: false
-      - key: response2
+      - key: 
         sync: false
-      - key: aio_HNRg355bTxuvO2ut4REDSN7VPJ6w
+      - key: 
         sync: false
 
       # Adafruit IO feeds
