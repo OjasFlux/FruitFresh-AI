@@ -1,4 +1,4 @@
-# FruitFresh-AI 🍎
+# FruitFresh-AI 
 
 **AI-powered fruit condition monitoring with IoT sensors and cloud alerts.**
 
