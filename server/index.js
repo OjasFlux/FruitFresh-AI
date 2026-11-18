@@ -3,13 +3,29 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const path = require("path");
+const crypto = require("crypto");
 
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
 const app = express();
+// Render sits behind a reverse proxy; trust one hop so per-client settings rate limits work.
+app.set("trust proxy", 1);
 const PORT = Number(process.env.PORT) || 5000;
 const MODEL_ID = "fruit-ripening-process/2";
 const API_KEY = process.env.ROBOFLOW_API_KEY;
+
+// Dashboard-managed Adafruit credentials are stored in Render's environment,
+// never in browser storage or the local filesystem. Only this server uses the
+// Render API token. Keep the settings password strong and private.
+const RENDER_API_KEY = (process.env.RENDER_API_KEY || "").trim();
+const RENDER_SERVICE_ID = (process.env.RENDER_SERVICE_ID || "").trim();
+const DASHBOARD_SETTINGS_PASSWORD = process.env.DASHBOARD_SETTINGS_PASSWORD || "";
+const DEVICE_CONFIG_TOKEN = (process.env.DEVICE_CONFIG_TOKEN || "").trim();
+const RENDER_API_ROOT = "https://api.render.com/v1";
+const AIO_API_ROOT = "https://io.adafruit.com/api/v2";
+const SETTINGS_MAX_FAILURES = 5;
+const SETTINGS_FAILURE_WINDOW_MS = 15 * 60 * 1000;
+const settingsFailures = new Map();
 
 // Adafruit IO cloud configuration. Keep AIO_KEY only on the backend and ESP8266.
 const AIO_USERNAME = (process.env.AIO_USERNAME || "").trim();
@@ -26,9 +42,6 @@ const ALERT_ACTIVE_HEARTBEAT_MS = 30000;
 const DETECTION_STALE_AFTER_MS = 15000;
 const AIO_REFRESH_INTERVAL_MS = 15000;
 const SENSOR_STALE_AFTER_MS = 90000;
-const AIO_API_ROOT = "https://io.adafruit.com/api/v2";
-
-
 app.use(cors({
   origin: [
     "http://localhost:5173",
@@ -300,6 +313,268 @@ async function refreshAdafruitSensorCache(force = false) {
 
   await aioRefreshInFlight;
 }
+
+function dashboardSettingsEnabled() {
+  return Boolean(
+    RENDER_API_KEY &&
+    /^srv-[A-Za-z0-9]+$/.test(RENDER_SERVICE_ID) &&
+    DASHBOARD_SETTINGS_PASSWORD.length >= 12 &&
+    DEVICE_CONFIG_TOKEN.length >= 24
+  );
+}
+
+function safePasswordMatch(supplied, expected) {
+  // Hash both inputs first, so timingSafeEqual always compares equal-length buffers.
+  const suppliedHash = crypto.createHash("sha256").update(String(supplied || "")).digest();
+  const expectedHash = crypto.createHash("sha256").update(String(expected || "")).digest();
+  return crypto.timingSafeEqual(suppliedHash, expectedHash);
+}
+
+function settingsRateLimit(req) {
+  const key = req.ip || req.socket?.remoteAddress || "unknown";
+  const now = Date.now();
+  const previous = settingsFailures.get(key);
+  if (!previous || now - previous.startedAt > SETTINGS_FAILURE_WINDOW_MS) {
+    settingsFailures.set(key, { startedAt: now, failures: 0 });
+    return { key, limited: false };
+  }
+  return { key, limited: previous.failures >= SETTINGS_MAX_FAILURES };
+}
+
+function recordSettingsFailure(key) {
+  const now = Date.now();
+  const entry = settingsFailures.get(key);
+  if (!entry || now - entry.startedAt > SETTINGS_FAILURE_WINDOW_MS) {
+    settingsFailures.set(key, { startedAt: now, failures: 1 });
+  } else {
+    entry.failures += 1;
+  }
+}
+
+async function callRenderApi(endpointPath, options = {}) {
+  const response = await fetch(`${RENDER_API_ROOT}${endpointPath}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${RENDER_API_KEY}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!response.ok) {
+    // Do not forward the Render API response body; it may include sensitive metadata.
+    throw new Error(`Render API request failed (HTTP ${response.status}). Check the Render API key, service ID, and service-level environment variable settings.`);
+  }
+  if (response.status === 204) return null;
+  return response.json().catch(() => null);
+}
+
+async function validateAdafruitCredentials(username, aioKey) {
+  const endpoint = `${AIO_API_ROOT}/${encodeURIComponent(username)}/feeds?limit=1`;
+  const response = await fetch(endpoint, {
+    method: "GET",
+    headers: { "X-AIO-Key": aioKey, Accept: "application/json" },
+    signal: AbortSignal.timeout(12000),
+  });
+  if (response.status === 401 || response.status === 403) {
+    throw new Error("Adafruit IO rejected this username/key. Check both values and try again.");
+  }
+  if (!response.ok) {
+    throw new Error(`Could not validate Adafruit IO credentials (HTTP ${response.status}). Try again shortly.`);
+  }
+}
+
+// The ESP8266 uses a stable device token and talks to this hosted backend over
+// HTTPS. The AIO key stays server-side: the backend publishes readings to Adafruit
+// IO, and the device polls the current alert state here. Rotating AIO credentials
+// in dashboard Settings therefore does not require reflashing the ESP8266.
+async function publishSensorValueToAio(feedKey, value) {
+  const endpoint = `${AIO_API_ROOT}/${encodeURIComponent(AIO_USERNAME)}/feeds/${encodeURIComponent(feedKey)}/data`;
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "X-AIO-Key": AIO_KEY,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ value }),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!response.ok) {
+    throw new Error(`Adafruit IO feed '${feedKey}' publish failed (HTTP ${response.status}).`);
+  }
+}
+
+function deviceTokenIsValid(req) {
+  const suppliedToken = req.get("X-Device-Token") || "";
+  return Boolean(DEVICE_CONFIG_TOKEN && safePasswordMatch(suppliedToken, DEVICE_CONFIG_TOKEN));
+}
+
+app.post("/api/device/readings", async (req, res) => {
+  if (!DEVICE_CONFIG_TOKEN || DEVICE_CONFIG_TOKEN.length < 24) {
+    return res.status(503).json({ error: "Device API is not configured." });
+  }
+  if (!deviceTokenIsValid(req)) {
+    return res.status(401).json({ error: "Unauthorized device." });
+  }
+  if (!adafruitConfigured()) {
+    return res.status(503).json({ error: "Adafruit IO is not configured on the backend." });
+  }
+
+  const { temperature, humidity, mq135Raw } = req.body || {};
+  const temp = Number(temperature);
+  const hum = Number(humidity);
+  const mq = Number(mq135Raw);
+  if (
+    !Number.isFinite(temp) || temp < -40 || temp > 85 ||
+    !Number.isFinite(hum) || hum < 0 || hum > 100 ||
+    !Number.isInteger(mq) || mq < 0 || mq > 1023
+  ) {
+    return res.status(400).json({ error: "Invalid sensor values. Check temperature, humidity, and MQ-135 ADC readings." });
+  }
+
+  try {
+    const results = await Promise.allSettled([
+      publishSensorValueToAio(AIO_TEMPERATURE_FEED, Number(temp.toFixed(2))),
+      publishSensorValueToAio(AIO_HUMIDITY_FEED, Number(hum.toFixed(2))),
+      publishSensorValueToAio(AIO_MQ135_FEED, mq),
+    ]);
+    const failures = results.filter((item) => item.status === "rejected");
+    if (failures.length) {
+      const messages = failures.map((item) => item.reason?.message || "Adafruit IO publish failed.");
+      console.error("Device sensor forwarding:", messages.join(" | "));
+      return res.status(502).json({ error: "One or more readings could not be sent to Adafruit IO. Check the account key and feed names." });
+    }
+
+    res.status(201).json({ accepted: true, source: "ESP8266", published: true, publishedAt: new Date().toISOString() });
+  } catch (error) {
+    console.error("Device sensor forwarding error:", error.message);
+    res.status(502).json({ error: "Could not forward sensor readings to Adafruit IO." });
+  }
+});
+
+app.get("/api/device/alert", (req, res) => {
+  if (!DEVICE_CONFIG_TOKEN || DEVICE_CONFIG_TOKEN.length < 24) {
+    return res.status(503).json({ error: "Device API is not configured." });
+  }
+  if (!deviceTokenIsValid(req)) {
+    return res.status(401).json({ error: "Unauthorized device." });
+  }
+
+  expireStaleSpoilageAlert();
+  const stateKnown = lastSuccessfulDetectionAt > 0 && Date.now() - lastSuccessfulDetectionAt <= DETECTION_STALE_AFTER_MS;
+  res.set("Cache-Control", "no-store");
+  res.json({
+    configured: spoilageAlertConfigured(),
+    stateKnown,
+    active: stateKnown && spoilageAlertActive,
+    updatedAt: lastSuccessfulDetectionAt ? new Date(lastSuccessfulDetectionAt).toISOString() : null,
+  });
+});
+
+// The gear button exposes only a non-secret status. The AIO key is never sent back
+// to React, even after a successful update.
+app.get("/api/settings/status", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json({
+    enabled: dashboardSettingsEnabled(),
+    aioUsername: AIO_USERNAME || "",
+    aioKeyConfigured: Boolean(AIO_KEY),
+    message: dashboardSettingsEnabled()
+      ? "Adafruit IO credentials can be updated securely here."
+      : "Credential settings need RENDER_API_KEY, RENDER_SERVICE_ID, DASHBOARD_SETTINGS_PASSWORD (12+ characters), and DEVICE_CONFIG_TOKEN (24+ characters) in Render's service environment.",
+  });
+});
+
+app.post("/api/settings/adafruit", async (req, res) => {
+  if (!dashboardSettingsEnabled()) {
+    return res.status(503).json({
+      error: "Dashboard credential settings are not enabled. Configure RENDER_API_KEY, RENDER_SERVICE_ID, DASHBOARD_SETTINGS_PASSWORD, and DEVICE_CONFIG_TOKEN on Render first.",
+    });
+  }
+
+  const rate = settingsRateLimit(req);
+  if (rate.limited) {
+    return res.status(429).json({ error: "Too many unsuccessful settings attempts. Wait 15 minutes and try again." });
+  }
+
+  const { adminPassword, username: rawUsername, aioKey: rawAioKey } = req.body || {};
+  const username = typeof rawUsername === "string" ? rawUsername.trim() : "";
+  const aioKey = typeof rawAioKey === "string" ? rawAioKey.trim() : "";
+
+  if (!safePasswordMatch(adminPassword, DASHBOARD_SETTINGS_PASSWORD)) {
+    recordSettingsFailure(rate.key);
+    return res.status(401).json({ error: "Settings password is incorrect." });
+  }
+  settingsFailures.delete(rate.key);
+
+  if (!username || username.length > 100 || /\s/.test(username)) {
+    return res.status(400).json({ error: "Enter a valid Adafruit IO username without spaces." });
+  }
+  if (!aioKey || aioKey.length < 12 || aioKey.length > 300 || /\s/.test(aioKey)) {
+    return res.status(400).json({ error: "Enter a valid Adafruit IO key without spaces." });
+  }
+
+  let credentialsSavedToRender = false;
+  try {
+    // Verify credentials before writing them to Render, preventing typos from
+    // overwriting working service settings.
+    await validateAdafruitCredentials(username, aioKey);
+
+    const servicePath = `/services/${encodeURIComponent(RENDER_SERVICE_ID)}/env-vars`;
+    // This endpoint updates one service-level env var at a time. These variables
+    // must not be managed only by a linked Render environment group.
+    await callRenderApi(`${servicePath}/AIO_KEY`, {
+      method: "PUT",
+      body: JSON.stringify({ value: aioKey }),
+    });
+    try {
+      await callRenderApi(`${servicePath}/AIO_USERNAME`, {
+        method: "PUT",
+        body: JSON.stringify({ value: username }),
+      });
+    } catch (usernameError) {
+      // Best-effort rollback of the first update, using the credentials already
+      // loaded by this instance; do not log the values.
+      if (AIO_KEY) {
+        try {
+          await callRenderApi(`${servicePath}/AIO_KEY`, {
+            method: "PUT",
+            body: JSON.stringify({ value: AIO_KEY }),
+          });
+        } catch { /* leave the original, actionable error below */ }
+      }
+      throw usernameError;
+    }
+
+    credentialsSavedToRender = true;
+    try {
+      await callRenderApi(`/services/${encodeURIComponent(RENDER_SERVICE_ID)}/deploys`, {
+        method: "POST",
+        body: JSON.stringify({ clearCache: "do_not_clear" }),
+      });
+    } catch (deployError) {
+      return res.status(502).json({
+        error: "Adafruit IO credentials were saved in Render, but Render did not start the redeployment. Open Render and choose Manual Deploy → Deploy latest commit.",
+      });
+    }
+
+    console.log("Adafruit IO credentials validated and Render redeployment requested from dashboard settings.");
+    return res.status(202).json({
+      saved: true,
+      deploying: true,
+      message: "Adafruit IO credentials validated and saved. Render is redeploying the service now; the dashboard may briefly reconnect.",
+    });
+  } catch (error) {
+    console.error("Dashboard Adafruit settings update failed:", error.message);
+    return res.status(502).json({
+      error: credentialsSavedToRender
+        ? "The credentials are saved in Render, but redeployment did not complete. Open Render and manually deploy the latest service configuration."
+        : (error.message || "Could not save Adafruit IO settings. Check credentials and Render configuration."),
+    });
+  }
+});
 
 app.get("/api/health", (req, res) => {
   expireStaleSpoilageAlert();
