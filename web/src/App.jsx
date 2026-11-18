@@ -19,19 +19,19 @@ import "./App.css";
 const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? "" : "http://localhost:5000");
 
 const CLASS_INFO = {
-  freshripe: { label: "Fresh Ripe", color: "#35d399" },
-  freshunripe: { label: "Fresh Unripe", color: "#60a5fa" },
-  overripe: { label: "Overripe", color: "#fbbf24" },
-  ripe: { label: "Ripe", color: "#34d399" },
-  rotten: { label: "Rotten", color: "#fb7185" },
-  unripe: { label: "Unripe", color: "#93c5fd" },
+  freshripe: { label: "Fresh Ripe", color: "#45C78A" },
+  freshunripe: { label: "Fresh Unripe", color: "#A8B5A2" },
+  overripe: { label: "Overripe", color: "#E6AB55" },
+  ripe: { label: "Ripe", color: "#45C78A" },
+  rotten: { label: "Rotten", color: "#E66B70" },
+  unripe: { label: "Unripe", color: "#8EA9C4" },
 };
 
 function getClassInfo(name = "unknown") {
   const key = name.toLowerCase().replace(/[\s_-]/g, "");
   return CLASS_INFO[key] || {
     label: name.replace(/[_-]/g, " "),
-    color: "#a5b4fc",
+    color: "#A899C7",
   };
 }
 
