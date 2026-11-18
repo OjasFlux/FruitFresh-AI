@@ -8,15 +8,11 @@ import {
   CircleAlert,
   ScanLine,
   ShieldAlert,
-  Settings,
-  X,
-  Save,
-  Eye,
-  EyeOff,
   Thermometer,
   Droplets,
   Wifi,
   WifiOff,
+  RefreshCw,
 } from "lucide-react";
 import "./App.css";
 
@@ -104,6 +100,10 @@ function App() {
   const busyRef = useRef(false);
   const sessionRef = useRef(0);
 
+  const [cameraDevices, setCameraDevices] = useState([]);
+  const [selectedCameraId, setSelectedCameraId] = useState("");
+  const [cameraListLoading, setCameraListLoading] = useState(false);
+
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
   const [backendReady, setBackendReady] = useState(false);
@@ -123,18 +123,6 @@ function App() {
     publishError: "",
   });
 
-  // Small, protected Settings panel for the client to rotate Adafruit IO credentials.
-  // The key is submitted directly to the backend and is never saved in browser storage.
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsInfo, setSettingsInfo] = useState(null);
-  const [settingsUsername, setSettingsUsername] = useState("");
-  const [settingsAioKey, setSettingsAioKey] = useState("");
-  const [settingsPassword, setSettingsPassword] = useState("");
-  const [settingsSaving, setSettingsSaving] = useState(false);
-  const [settingsError, setSettingsError] = useState("");
-  const [settingsMessage, setSettingsMessage] = useState("");
-  const [showAioKey, setShowAioKey] = useState(false);
-  const [showSettingsPassword, setShowSettingsPassword] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -227,61 +215,50 @@ function App() {
     };
   }, []);
 
-  async function openSettings() {
-    setSettingsOpen(true);
-    setSettingsError("");
-    setSettingsMessage("");
-    try {
-      const response = await fetch(`${API_URL}/api/settings/status`, { cache: "no-store" });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Could not load settings status.");
-      setSettingsInfo(result);
-      setSettingsUsername(result.aioUsername || "");
-    } catch (err) {
-      setSettingsInfo({ enabled: false, message: "Settings service is unavailable. Please try again later." });
-      setSettingsError(err.message || "Could not load settings status.");
+  const refreshCameraDevices = useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      setError("Camera selection is not supported by this browser.");
+      return;
     }
-  }
 
-  function closeSettings() {
-    if (settingsSaving) return;
-    setSettingsOpen(false);
-    setSettingsAioKey("");
-    setSettingsPassword("");
-    setSettingsError("");
-    setSettingsMessage("");
-    setShowAioKey(false);
-    setShowSettingsPassword(false);
-  }
-
-  async function saveAdafruitSettings(event) {
-    event.preventDefault();
-    setSettingsError("");
-    setSettingsMessage("");
-    setSettingsSaving(true);
+    setCameraListLoading(true);
     try {
-      const response = await fetch(`${API_URL}/api/settings/adafruit`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          adminPassword: settingsPassword,
-          username: settingsUsername.trim(),
-          aioKey: settingsAioKey.trim(),
-        }),
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cameras = devices
+        .filter((device) => device.kind === "videoinput")
+        .map((device, index) => ({
+          deviceId: device.deviceId,
+          label: device.label || `Webcam ${index + 1}`,
+        }));
+
+      setCameraDevices(cameras);
+      setSelectedCameraId((current) => {
+        if (current && cameras.some((camera) => camera.deviceId === current)) return current;
+        return cameras[0]?.deviceId || "";
       });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error || "Could not update Adafruit IO settings.");
-      setSettingsMessage(result.message || "Credentials saved. The service is restarting.");
-      setSettingsAioKey("");
-      setSettingsPassword("");
-      setShowAioKey(false);
-      setShowSettingsPassword(false);
+
+      if (cameras.length === 0) {
+        setError("No webcam was found. Connect a camera, then refresh the camera list.");
+      } else {
+        setError("");
+      }
     } catch (err) {
-      setSettingsError(err.message || "Could not update Adafruit IO settings.");
+      setError(err.message || "Could not list available webcams.");
     } finally {
-      setSettingsSaving(false);
+      setCameraListLoading(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    refreshCameraDevices();
+
+    const handleDeviceChange = () => refreshCameraDevices();
+    navigator.mediaDevices?.addEventListener?.("devicechange", handleDeviceChange);
+
+    return () => {
+      navigator.mediaDevices?.removeEventListener?.("devicechange", handleDeviceChange);
+    };
+  }, [refreshCameraDevices]);
 
   const stopCamera = useCallback(() => {
     runningRef.current = false;
@@ -318,12 +295,19 @@ function App() {
     setStatus("Requesting camera permission...");
 
     try {
+      const videoConstraints = {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+      };
+
+      if (selectedCameraId) {
+        videoConstraints.deviceId = { exact: selectedCameraId };
+      } else {
+        videoConstraints.facingMode = { ideal: "environment" };
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          facingMode: "environment",
-        },
+        video: videoConstraints,
         audio: false,
       });
 
@@ -343,6 +327,7 @@ function App() {
       setCameraOn(true);
       setCameraReady(true);
       setStatus("Camera active. Analyzing frames...");
+      refreshCameraDevices();
     } catch (err) {
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -468,20 +453,9 @@ function App() {
           </div>
         </div>
 
-        <div className="header-actions">
-          <button
-            type="button"
-            className="settings-trigger"
-            aria-label="Open settings"
-            title="Settings"
-            onClick={openSettings}
-          >
-            <Settings size={17} />
-          </button>
-          <div className="header-status">
-            <span className={`status-dot ${backendReady ? "online" : ""}`} />
-            {backendReady ? "Backend connected" : "Backend disconnected"}
-          </div>
+        <div className="header-status">
+          <span className={`status-dot ${backendReady ? "online" : ""}`} />
+          {backendReady ? "Backend connected" : "Backend disconnected"}
         </div>
       </header>
 
@@ -621,11 +595,50 @@ function App() {
             {!cameraOn && (
               <div className="video-placeholder">
                 <div className="placeholder-icon"><Camera size={22} /></div>
-                <strong>Camera preview is off</strong>
-                <p>Start the webcam to begin detection.</p>
+                <strong>Select a webcam to begin</strong>
+                <p>Choose your camera below, then start live fruit detection.</p>
               </div>
             )}
           </div>
+
+          {!cameraOn && (
+            <div className="camera-setup-note" role="status">
+              <Camera size={16} />
+              <span>Choose a webcam below. Your browser will ask for camera permission when you start detection.</span>
+            </div>
+          )}
+
+          {!cameraOn && (
+            <div className="camera-device-row">
+              <label htmlFor="camera-device-select">Webcam</label>
+              <select
+                id="camera-device-select"
+                value={selectedCameraId}
+                onChange={(event) => setSelectedCameraId(event.target.value)}
+                disabled={cameraListLoading || cameraDevices.length === 0}
+              >
+                {cameraDevices.length === 0 ? (
+                  <option value="">No webcam found</option>
+                ) : (
+                  cameraDevices.map((device, index) => (
+                    <option key={device.deviceId || index} value={device.deviceId}>
+                      {device.label || `Webcam ${index + 1}`}
+                    </option>
+                  ))
+                )}
+              </select>
+              <button
+                type="button"
+                className="camera-refresh-button"
+                onClick={refreshCameraDevices}
+                disabled={cameraListLoading}
+                aria-label="Refresh webcam list"
+                title="Refresh webcam list"
+              >
+                <RefreshCw size={15} className={cameraListLoading ? "is-spinning" : ""} />
+              </button>
+            </div>
+          )}
 
           <div className="camera-footer">
             <div className="camera-status">
@@ -753,104 +766,7 @@ function App() {
         <span>AI vision · Adafruit IO telemetry · FruitFresh-AI</span>
       </footer>
 
-      {settingsOpen && (
-        <div
-          className="settings-overlay"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) closeSettings();
-          }}
-        >
-          <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-            <div className="settings-dialog-heading">
-              <div className="settings-dialog-title-icon"><Settings size={19} /></div>
-              <div className="settings-dialog-title-copy">
-                <p className="settings-eyebrow">DEVICE CONFIGURATION</p>
-                <h2 id="settings-title">Settings</h2>
-                <p>Update the Adafruit IO connection used by this dashboard.</p>
-              </div>
-              <button type="button" className="settings-close" onClick={closeSettings} disabled={settingsSaving} aria-label="Close settings">
-                <X size={19} />
-              </button>
-            </div>
 
-            {settingsInfo && !settingsInfo.enabled && (
-              <div className="settings-note settings-note-warning">
-                <CircleAlert size={17} />
-                <span>{settingsInfo.message || "Dashboard credential updates are not configured."}</span>
-              </div>
-            )}
-
-            {settingsInfo?.enabled && (
-              <div className="settings-note settings-note-safe">
-                <ShieldAlert size={16} />
-                <span>Your AIO key is sent to the backend and never returned to the browser. Saving validates it and redeploys the service. The ESP8266 never stores the AIO key; it uses a separate device token.</span>
-              </div>
-            )}
-
-            <form className="settings-form" onSubmit={saveAdafruitSettings}>
-              <label htmlFor="settings-aio-username">Adafruit IO username</label>
-              <input
-                id="settings-aio-username"
-                type="text"
-                value={settingsUsername}
-                onChange={(event) => setSettingsUsername(event.target.value)}
-                autoComplete="username"
-                placeholder="Your Adafruit IO username"
-                required
-                maxLength={100}
-                disabled={!settingsInfo?.enabled || settingsSaving}
-              />
-
-              <label htmlFor="settings-aio-key">New Adafruit IO key</label>
-              <div className="settings-input-with-action">
-                <input
-                  id="settings-aio-key"
-                  type={showAioKey ? "text" : "password"}
-                  value={settingsAioKey}
-                  onChange={(event) => setSettingsAioKey(event.target.value)}
-                  autoComplete="new-password"
-                  placeholder="Paste the current AIO key"
-                  required
-                  maxLength={300}
-                  disabled={!settingsInfo?.enabled || settingsSaving}
-                />
-                <button type="button" className="settings-input-action" onClick={() => setShowAioKey((value) => !value)} aria-label={showAioKey ? "Hide AIO key" : "Show AIO key"} disabled={!settingsInfo?.enabled || settingsSaving}>
-                  {showAioKey ? <EyeOff size={17} /> : <Eye size={17} />}
-                </button>
-              </div>
-
-              <label htmlFor="settings-admin-password">Settings administrator password</label>
-              <div className="settings-input-with-action">
-                <input
-                  id="settings-admin-password"
-                  type={showSettingsPassword ? "text" : "password"}
-                  value={settingsPassword}
-                  onChange={(event) => setSettingsPassword(event.target.value)}
-                  autoComplete="current-password"
-                  placeholder="Password provided by the project owner"
-                  required
-                  maxLength={200}
-                  disabled={!settingsInfo?.enabled || settingsSaving}
-                />
-                <button type="button" className="settings-input-action" onClick={() => setShowSettingsPassword((value) => !value)} aria-label={showSettingsPassword ? "Hide password" : "Show password"} disabled={!settingsInfo?.enabled || settingsSaving}>
-                  {showSettingsPassword ? <EyeOff size={17} /> : <Eye size={17} />}
-                </button>
-              </div>
-
-              {settingsError && <div className="settings-note settings-note-error" role="alert"><CircleAlert size={17} /><span>{settingsError}</span></div>}
-              {settingsMessage && <div className="settings-note settings-note-success" role="status"><CheckCircle2 size={17} /><span>{settingsMessage}</span></div>}
-
-              <div className="settings-form-footer">
-                <p>Feed names stay the same: temperature, humidity, mq135, and spoilage-alert.</p>
-                <button className="button button-primary settings-save-button" type="submit" disabled={!settingsInfo?.enabled || settingsSaving || !settingsUsername.trim() || !settingsAioKey.trim() || !settingsPassword}>
-                  <Save size={16} /> {settingsSaving ? "Validating and saving…" : "Save and reconnect"}
-                </button>
-              </div>
-            </form>
-          </section>
-        </div>
-      )}
     </main>
   );
 }
