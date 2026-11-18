@@ -705,7 +705,7 @@ function App() {
                       <div className="class-name">
                         <span
                           className="class-indicator"
-                          style={{ backgroundColor: info.color }}
+                          style={{ backgroundColor: info.color, color: info.color }}
                         />
                         <strong>{info.label}</strong>
                       </div>
@@ -717,6 +717,8 @@ function App() {
                         style={{
                           width: `${confidence}%`,
                           backgroundColor: info.color,
+                          color: info.color,
+                          "--confidence-color": info.color,
                         }}
                       />
                     </div>
@@ -730,10 +732,15 @@ function App() {
             <span>Classes detected</span>
             <div className="class-tags">
               {detectedClasses.length
-                ? detectedClasses.map((name) => (
-                    <span key={name}>{getClassInfo(name).label}</span>
-                  ))
-                : <span>Waiting for results</span>}
+                ? detectedClasses.map((name) => {
+                    const info = getClassInfo(name);
+                    return (
+                      <span key={name} style={{ "--tag-color": info.color }}>
+                        {info.label}
+                      </span>
+                    );
+                  })
+                : <span className="tag-muted">Waiting for results</span>}
             </div>
           </div>
 
